@@ -1,0 +1,168 @@
+h <- qbdraftmodel%>%
+  separate(Player,into = c('Player', 'id'), sep = "\\\\")%>%
+  select(Rnd,Pick,Player)
+
+q <- qb%>%
+  left_join(h, by= c('Player'='Player'))
+   
+
+q <- q[,-(1:2)]
+
+q$TDperc <- gsub("\\%","",q$TDperc)
+q$Intperc <- gsub("\\%","",q$Intperc)
+q$Compperc <- gsub("\\%","",q$Compperc)
+q$OnTargetperc <- gsub("\\%","",q$OnTargetperc)
+
+q$TDperc <- as.numeric(q$TDperc)
+q$Intperc <- as.numeric(q$Intperc)
+q$Compperc <- as.numeric(q$Compperc)
+q$OnTargetperc <- as.numeric(q$OnTargetperc)
+
+#q <- as.numeric(q)
+
+qbs <- q %>%
+  group_by(Player, Team) %>%
+  dplyr::summarize(Seasons = n(),
+            Dropbacks = sum(Dropbacks),
+            Att = sum(Att),
+            Comp = sum(Comp),
+            OnTGT = sum(OnTgt),
+            Yds = sum(Yds),
+            AirYards = sum(AirYards),
+            TD = sum(TDs),
+            TDperc = mean(TDperc),
+            Ints = sum(Ints),
+            Intperc = mean(Intperc),
+            Sacks = sum(Sacks),
+            Sacksperc = (Sacks/Dropbacks)*100, 
+            Compperc = mean(Compperc),
+            OnTgtperc = mean(OnTargetperc),
+            YA = mean(YA),
+            YG = mean(YG),
+            Rating = mean(Rating),
+            IQR = mean(IQR),
+            Round = mean(Rnd),
+            Pick = mean(Pick)
+            )
+
+
+
+x <- qbs %>% 
+  #mutate(broken_tackle_rate = broken_tackles / total_rec,
+   #      td_rate = total_tds / total_targets,
+  #      yac_perc = total_yac / total_yards) %>%
+  dplyr::select(Seasons, Dropbacks, Att, Comp, OnTGT,
+                Yds, AirYards, TD, TDperc, Ints, Intperc, Sacks, Sacksperc,Compperc,OnTgtperc, YA, YG,Rating ,IQR )
+
+f <- x[,-1]
+
+t <- f%>% 
+  mutate_at(c(1:19), ~replace(., is.na(.), 0))
+
+
+  scale(t)
+
+  
+set.seed(222)
+MAX_K <- 20
+sse <- c() 
+
+for (k in 1:MAX_K) {
+  algo_k <- kmeans(t, centers=k, nstart=22, iter.max=20) # k-means algorithm
+  sse <- c(sse, algo_k$tot.withinss) # get SSE
+} 
+
+tibble(k = 1:MAX_K, SSE_difference = sse-2*lead(sse)+lead(sse, 2)) %>%
+  dplyr::filter(k<MAX_K-1) %>%
+  ggplot(aes(x=k, y=SSE_difference)) + 
+  geom_point(color="#F84C1E") + geom_line(color="#232D4B") + 
+  labs(x = "K", y = "SSE Rolling 2-Unit Difference", title = "An Even Clearer Picture") + 
+  scale_x_continuous(breaks=seq(1, MAX_K, 1)) + 
+  theme_minimal() + theme_tej() + 
+  theme(panel.grid.minor.x = element_blank(), panel.grid.minor.y = element_blank())
+
+set.seed(22)
+# re-run K-Means with 6 clusters
+K <- 6
+kmeans6 <- kmeans(t, centers=K, nstart=22, iter.max=20)
+km_centers <- as.data.frame(kmeans6$centers) # SCALED cluster centers/means
+
+# name clusters before pivoting
+km_centers$Cluster <- c('Cluster 1', 'Cluster 2', 'Cluster 3',
+                        'Cluster 4', 'Cluster 5', 'Cluster 6')
+
+
+km_centers <- km_centers %>%
+#  rename(c('EXP'='Seasons', 'CP'='comp_perc', # give predictors a shorter name for plotting
+  #           'YPT'='yards_per_target', 'YPR'='yards_per_rec',
+  #        'FDP'='first_down_perc', 'TD'='td_rate',
+  #        '40'='fourty_time', 'VT'='vertical', 'HT'='height',
+  #        'WGT'='weight', 'DR'='drop_rate', 'YPG'='yards_per_game', "YAC" = 'yac_perc')) %>%
+  pivot_longer(!Cluster, names_to = 'feature', values_to = 'z_val') # pivot data to make plotting easier
+
+km_centers$Cluster <- factor(km_centers$Cluster, levels=c('Cluster 1', 'Cluster 2', 'Cluster 3', 'Cluster 4',
+                                                          'Cluster 5', 'Cluster 6'))
+
+clusters <- tibble(cluster=kmeans6$cluster, player=qbs$Player)
+
+km_centers %>% 
+  ggplot(aes(x=feature, y=z_val, color=Cluster)) + 
+  geom_point(size = 5) + # plot points
+  scale_color_brewer(palette="Dark2") + # color points
+  gghighlight(use_direct_label = FALSE) + # highlight each cluster
+  facet_wrap(~ Cluster, ncol=3) + # create seperate plots for each cluster
+  labs(x = "Predictor", y = "Cluster Center", 
+       title = "Visualizing K-Means Cluster Makeups for Receivers in the NFL Draft",
+       caption = 'By Tej Seth | @mfbanalytics | @_AlexStern') + 
+  theme_minimal() + theme_tej() + 
+  theme(legend.position = "none", strip.text = element_text(face='bold', size = 15),
+        axis.text.x = element_text(angle=90, size=12), # alter axis text
+        panel.grid.minor = element_blank(),
+        strip.background = element_rect(color="black", fill="#add8e6", size=1.5, linetype="solid"))
+
+
+ggsave('wr_clusters_1.png', width = 14, height = 10, dpi = "retina")
+
+y <- qbs %>%
+  left_join(clusters, by = c('Player'='player'))
+
+pca <- prcomp(t) # perform Principle Component Analysis 
+pca_summary <- summary(pca) # summary of PCA model
+
+pc2 <- as.data.frame(pca$x[,1:2]) # extract first two PCs
+pc2$Cluster <- as.factor(kmeans6$cluster) # add player clusters 
+cluster1_var <- round(pca_summary$importance[2,1], 4) * 100 # get variance explained by cluster 1
+cluster2_var <- round(pca_summary$importance[2,2], 4) * 100 # get variance explained by cluster 2
+
+pc2 <- pc2 %>%
+  arrange(Cluster) %>%
+  mutate(id = row_number())
+
+f <- y %>%
+  arrange(cluster) %>%
+  mutate(id = row_number())
+ 
+f$cluster <- as.factor(f$cluster)
+
+l <- f %>%
+  left_join(pc2, by = c("id" = "id"))
+
+p <- l %>% 
+ filter(Round == 1 | Round == 2 | Round == 3) 
+
+  p%>%
+  ggplot(aes(x=PC1, y=PC2, color=cluster, shape=cluster)) + 
+  geom_point(alpha=0.3) + 
+  geom_text_repel(aes(label = Player)) +
+  scale_color_brewer(palette="Dark2") +
+  geom_rug() + # great way to visualize points on a single axis
+  theme_bw() + stat_ellipse(level=(2/3)) + # set ellipse value to one standard deviation
+  scale_shape_manual(values=seq(0,15)) + 
+  labs(x = paste0('PC1 (Accounts for ', cluster1_var, '% of Variance)'), # define cluster 1 % of variance
+       y = paste0('PC2 (Accounts for ', cluster2_var, '% of Variance)'), # define cluster 2 % of variance
+       title = "NFL Draft Wide Receiver Clusters",
+       subtitle = 'Receivers drafted in the 1st or 2nd round since 2016 and all draft elgible receivers this year',
+       caption = 'By Tej Seth | @mfbanalytics | @_AlexStern') + 
+  theme_tej() +
+  theme(legend.position = "right") 
+  p + coord_cartesian()
